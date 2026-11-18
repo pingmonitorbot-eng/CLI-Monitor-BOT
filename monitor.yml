@@ -1,0 +1,41 @@
+name: SMS Monitor Worker
+
+on:
+  workflow_dispatch:
+  # backup: every 4 hours if controller fails (optional)
+  # schedule:
+  #   - cron: "0 */4 * * *"
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240   # 4 hours hard cap (worker self-exits ~3.5h)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          pip install -r requirements-worker.txt
+          playwright install --with-deps chromium
+
+      - name: Run worker
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          MONGO_DB: ${{ secrets.MONGO_DB }}
+          CHECK_INTERVAL: ${{ secrets.CHECK_INTERVAL }}
+          LOOKBACK_MINUTES: ${{ secrets.LOOKBACK_MINUTES }}
+          WORKER_MAX_HOURS: "3.5"
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          export CHECK_INTERVAL="${CHECK_INTERVAL:-5}"
+          export LOOKBACK_MINUTES="${LOOKBACK_MINUTES:-10}"
+          export MONGO_DB="${MONGO_DB:-sms_monitor}"
+          python monitor_worker.py
