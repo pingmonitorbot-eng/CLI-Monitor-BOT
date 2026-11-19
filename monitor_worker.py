@@ -2,12 +2,12 @@
 """
 GitHub Actions worker — monitors all panels, posts to Telegram.
 
-- Panels WITHOUT row time (Blue/Unix): 10-min query window; post whatever is found.
-- Panels WITH row time (ITS/Choice/Hadi/Zyron/Lamix): no 10-min row filter;
-  save latest event TIME per panel+CLI; only post rows newer than that time
-  (same range name allowed if time is newer).
-- Lamix: screenshot + up to 3 copy buttons when posting.
-- Lamix posts go to lamix_group_chat_id if set.
+- Panels WITHOUT row time (Blue/Unix): 10-min query; post all hits.
+  Caption: Searched Time: from → to
+- Panels WITH row time (ITS/Choice/Hadi/Zyron/Lamix): no 10-min filter;
+  save latest event TIME; post only newer times (same range OK if time differs).
+  Caption: Time: <exact latest range time>
+- Lamix: screenshot + copy buttons; posts to lamix_group_chat_id if set.
 """
 import os
 import sys
@@ -16,7 +16,7 @@ import logging
 import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import requests
 
@@ -108,7 +108,16 @@ def build_copy_keyboard(ranges: List[str], limit: int = 3) -> Optional[dict]:
     return {"inline_keyboard": rows} if rows else None
 
 
-def format_caption(panel_name: str, cli: str, ranges: List[str]) -> str:
+def format_caption(
+    panel_name: str,
+    cli: str,
+    ranges: List[str],
+    *,
+    has_row_time: bool,
+    event_time: str = "",
+    searched_from: str = "",
+    searched_to: str = "",
+) -> str:
     lines = [
         "🆕 *New Range Found*",
         "━━━━━━━━━━━━━━",
@@ -120,6 +129,13 @@ def format_caption(panel_name: str, cli: str, ranges: List[str]) -> str:
     ]
     for r in ranges[:15]:
         lines.append(f"• `{r}`")
+    lines.append("")
+    if has_row_time:
+        lines.append(f"🕒 *Time:* `{event_time or '-'}`")
+    else:
+        lines.append(
+            f"🕒 *Searched Time:* `{searched_from or '-'}` → `{searched_to or '-'}`"
+        )
     return "\n".join(lines)
 
 
@@ -189,7 +205,7 @@ def search_one_panel(panel: dict, cli: str, client_cache: dict):
                     client.close()
                 except Exception:
                     pass
-            return ("__LOGIN_FAIL__", reason, None)
+            return ("__LOGIN_FAIL__", reason, None, "", "")
 
         raw_items, df, dt = client.search_cli(
             cli, LOOKBACK_MINUTES, filter_by_time=filter_by_time
@@ -208,7 +224,7 @@ def search_one_panel(panel: dict, cli: str, client_cache: dict):
             })
         shot = getattr(client, "_last_screenshot", None)
         logger.info("<< panel=%s OK hits=%s has_row_time=%s", name, len(items), has_row_time)
-        return items, shot, has_row_time
+        return items, shot, has_row_time, df or "", dt or ""
     except Exception as e:
         logger.error("<< panel=%s ERROR: %s", name, e)
         logger.debug(traceback.format_exc())
@@ -337,9 +353,8 @@ def main():
             if not result:
                 continue
 
-            a, b, c = result
-            if a == "__LOGIN_FAIL__":
-                reason = b or "unknown"
+            if result[0] == "__LOGIN_FAIL__":
+                reason = result[1] or "unknown"
                 if group_id:
                     pid = str(panel.get("_id"))
                     if pid not in login_fail_notified:
@@ -356,7 +371,11 @@ def main():
                         )
                 continue
 
-            items, shot, has_row_time = a, b, c
+            items = result[0]
+            shot = result[1]
+            has_row_time = result[2]
+            searched_from = result[3] if len(result) > 3 else ""
+            searched_to = result[4] if len(result) > 4 else ""
             if not items:
                 continue
 
@@ -419,16 +438,34 @@ def main():
             if not ranges:
                 continue
 
+            event_time_str = ""
             if has_row_time:
-                posted_times = [
-                    parse_event_time(it.get("event_time") or "")
-                    for it in post_items
-                ]
-                posted_times = [x for x in posted_times if x is not None]
-                if posted_times:
-                    set_cli_latest_time(pid, cli, to_iso(max(posted_times)))
+                posted_times = []
+                best = None
+                best_dt = None
+                for it in post_items:
+                    et = (it.get("event_time") or "").strip()
+                    if not et:
+                        continue
+                    pdt = parse_event_time(et)
+                    if pdt and (best_dt is None or pdt > best_dt):
+                        best_dt = pdt
+                        best = et
+                    posted_times.append(pdt)
+                event_time_str = best or ""
+                valid = [x for x in posted_times if x is not None]
+                if valid:
+                    set_cli_latest_time(pid, cli, to_iso(max(valid)))
 
-            caption = format_caption(panel.get("name"), cli, ranges)
+            caption = format_caption(
+                panel.get("name"),
+                cli,
+                ranges,
+                has_row_time=has_row_time,
+                event_time=event_time_str,
+                searched_from=searched_from,
+                searched_to=searched_to,
+            )
             kb = build_copy_keyboard(ranges, limit=3)
             photo = shot if isinstance(shot, (bytes, bytearray)) else None
 
