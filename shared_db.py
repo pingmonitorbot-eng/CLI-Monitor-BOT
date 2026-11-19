@@ -51,15 +51,17 @@ def get_panel(panel_id) -> Optional[dict]:
 
 
 def get_cli_latest_time(panel_id: str, cli: str) -> Optional[str]:
-    doc = col_cli_state.find_one({"_id": f"{panel_id}::{cli}"})
+    key = panel_id + "::" + cli
+    doc = col_cli_state.find_one({"_id": key})
     if not doc:
         return None
     return doc.get("latest_time") or None
 
 
 def set_cli_latest_time(panel_id: str, cli: str, latest_time: str):
+    key = panel_id + "::" + cli
     col_cli_state.update_one(
-        {"_id": f"{panel_id}::{cli"},
+        {"_id": key},
         {
             "$set": {
                 "panel_id": panel_id,
