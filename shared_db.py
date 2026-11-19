@@ -11,7 +11,7 @@ _client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=10000)
 db = _client[MONGO_DB]
 col_panels = db["panels"]
 col_settings = db["settings"]
-col_cli_state = db["cli_state"]  # latest event time per panel+cli
+col_cli_state = db["cli_state"]
 
 
 def ping() -> bool:
@@ -23,6 +23,7 @@ def get_settings() -> dict:
     doc = col_settings.find_one({"_id": "main"}) or {}
     return {
         "group_chat_id": doc.get("group_chat_id"),
+        "lamix_group_chat_id": doc.get("lamix_group_chat_id"),
         "monitor_running": doc.get("monitor_running", False),
         "clis": doc.get("clis") or [],
         "worker_heartbeat": doc.get("worker_heartbeat"),
@@ -50,7 +51,6 @@ def get_panel(panel_id) -> Optional[dict]:
 
 
 def get_cli_latest_time(panel_id: str, cli: str) -> Optional[str]:
-    """ISO time string of last posted/seen event for panel+cli, or None."""
     doc = col_cli_state.find_one({"_id": f"{panel_id}::{cli}"})
     if not doc:
         return None
@@ -59,7 +59,7 @@ def get_cli_latest_time(panel_id: str, cli: str) -> Optional[str]:
 
 def set_cli_latest_time(panel_id: str, cli: str, latest_time: str):
     col_cli_state.update_one(
-        {"_id": f"{panel_id}::{cli}"},
+        {"_id": f"{panel_id}::{cli"},
         {
             "$set": {
                 "panel_id": panel_id,
