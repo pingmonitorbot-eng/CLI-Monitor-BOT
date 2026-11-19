@@ -4,10 +4,9 @@ GitHub Actions worker — monitors all panels, posts to Telegram.
 
 - Panels WITHOUT row time (Blue/Unix): 10-min query; post all hits.
   Caption: Searched Time: from → to
-- Panels WITH row time (ITS/Choice/Hadi/Zyron/Lamix): no 10-min filter;
-  save latest event TIME; post only newer times (same range OK if time differs).
+- Panels WITH row time (ITS/Choice/Hadi/Zyron/Lamix): time-cursor dedup.
   Caption: Time: <exact latest range time>
-- Lamix: screenshot + copy buttons; posts to lamix_group_chat_id if set.
+- Lamix only: screenshot + lamix_group_chat_id; ONE message (photo OR text).
 """
 import os
 import sys
@@ -424,8 +423,16 @@ def main():
 
                 if not timed:
                     samples = [repr((it.get("event_time") or "")[:80]) for it in items[:3]]
+                    if prev_dt is not None:
+                        logger.info(
+                            "panel=%s cli=%s unparseable times, cursor set — skip samples=%s",
+                            panel.get("name"),
+                            cli,
+                            samples,
+                        )
+                        continue
                     logger.warning(
-                        "panel=%s cli=%s no parseable event times samples=%s — post all hits",
+                        "panel=%s cli=%s no parseable event times samples=%s — post once",
                         panel.get("name"),
                         cli,
                         samples,
@@ -490,9 +497,10 @@ def main():
             photo = shot if isinstance(shot, (bytes, bytearray)) else None
 
             ptype = panel.get("type")
-            target = group_id
             if ptype == "lamix_sms":
                 target = st.get("lamix_group_chat_id") or group_id
+            else:
+                target = group_id
             logger.info(
                 "POST panel=%s type=%s cli=%s chat=%s ranges=%s photo=%s",
                 panel.get("name"),
@@ -504,19 +512,35 @@ def main():
             )
             ok = False
             if target:
-                ok = tg_send(int(target), caption, reply_markup=kb)
-                if not ok:
-                    ok = tg_send(int(target), caption, reply_markup=None)
                 if photo:
-                    tg_send_photo(int(target), bytes(photo), caption, reply_markup=kb)
-                if not ok and ptype == "lamix_sms" and group_id and int(target) != int(group_id):
-                    logger.error("Lamix chat %s failed — fallback main group %s", target, group_id)
-                    ok = tg_send(int(group_id), "⚠️ Lamix group failed, posting here:\n" + caption)
+                    ok = tg_send_photo(int(target), bytes(photo), caption, reply_markup=kb)
+                    if not ok:
+                        ok = tg_send(int(target), caption, reply_markup=kb)
+                    if not ok:
+                        ok = tg_send(int(target), caption, reply_markup=None)
+                else:
+                    ok = tg_send(int(target), caption, reply_markup=kb)
+                    if not ok:
+                        ok = tg_send(int(target), caption, reply_markup=None)
+                if (
+                    not ok
+                    and ptype == "lamix_sms"
+                    and group_id
+                    and int(target) != int(group_id)
+                ):
+                    logger.error("Lamix chat %s failed — fallback main %s", target, group_id)
+                    ok = tg_send(
+                        int(group_id),
+                        "⚠️ Lamix group failed, posting here:\n" + caption,
+                    )
             else:
                 logger.error("No target chat for panel=%s", panel.get("name"))
 
-            if ok and has_row_time and best_dt is not None:
-                set_cli_latest_time(pid, cli, to_iso(best_dt))
+            if ok and has_row_time:
+                if best_dt is not None:
+                    set_cli_latest_time(pid, cli, to_iso(best_dt))
+                else:
+                    set_cli_latest_time(pid, cli, to_iso(datetime.now(timezone.utc)))
             elif not ok:
                 logger.error("POST FAILED panel=%s cli=%s", panel.get("name"), cli)
 
