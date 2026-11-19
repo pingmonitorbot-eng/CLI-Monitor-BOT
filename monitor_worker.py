@@ -7,6 +7,7 @@ GitHub Actions worker — monitors all panels, posts to Telegram.
   save latest event TIME per panel+CLI; only post rows newer than that time
   (same range name allowed if time is newer).
 - Lamix: screenshot + up to 3 copy buttons when posting.
+- Lamix posts go to lamix_group_chat_id if set.
 """
 import os
 import sys
@@ -164,19 +165,11 @@ def heartbeat():
 
 
 def search_one_panel(panel: dict, cli: str, client_cache: dict):
-    """
-    Returns:
-      ("__LOGIN_FAIL__", reason, None) |
-      (items: list[dict], screenshot_bytes|None, has_row_time: bool) |
-      None on hard error
-    items have range_name, event_time (optional)
-    """
     pid = str(panel["_id"])
     name = panel.get("name") or pid
     ptype = panel.get("type")
     info = PANEL_TYPES.get(ptype) or {}
     has_row_time = bool(info.get("has_row_time"))
-    # Blue/Unix: filter on query. Dated panels: fetch without 10-min row cut.
     filter_by_time = not has_row_time
     logger.info(
         ">> panel=%s type=%s cli=%s filter_time=%s",
@@ -372,50 +365,50 @@ def main():
             max_dt = None
 
             if has_row_time:
-                # Time-cursor dedup: only events after saved latest_time
                 prev_iso = get_cli_latest_time(pid, cli)
                 prev_dt = parse_event_time(prev_iso) if prev_iso else None
-                # First run: soft floor = now - LOOKBACK so we don't flood years of history
-                if prev_dt is None:
-                    prev_dt = datetime.now(timezone.utc) - timedelta(minutes=LOOKBACK_MINUTES)
-                    logger.info(
-                        "panel=%s cli=%s no saved time → floor last %s min",
-                        panel.get("name"),
-                        cli,
-                        LOOKBACK_MINUTES,
-                    )
 
+                timed = []
                 for it in items:
                     evt = parse_event_time(it.get("event_time") or "")
                     if evt is None:
                         continue
+                    timed.append((evt, it))
                     if max_dt is None or evt > max_dt:
                         max_dt = evt
-                    if evt > prev_dt:
-                        post_items.append(it)
 
-                if max_dt is not None:
-                    # Always advance cursor to newest seen (even if nothing to post)
-                    # Only advance if >= prev so clock doesn't go backwards
-                    if max_dt > prev_dt:
-                        set_cli_latest_time(pid, cli, to_iso(max_dt))
-                    elif prev_iso is None:
-                        set_cli_latest_time(pid, cli, to_iso(max_dt))
-
-                if not post_items:
+                if not timed:
                     logger.info(
-                        "panel=%s cli=%s no rows after %s",
+                        "panel=%s cli=%s no parseable event times",
                         panel.get("name"),
                         cli,
-                        prev_iso or "floor",
                     )
                     continue
+
+                if prev_dt is None:
+                    post_items = [it for evt, it in timed if evt == max_dt]
+                    logger.info(
+                        "panel=%s cli=%s first-run latest @ %s count=%s",
+                        panel.get("name"),
+                        cli,
+                        to_iso(max_dt),
+                        len(post_items),
+                    )
+                else:
+                    post_items = [it for evt, it in timed if evt > prev_dt]
+                    if not post_items:
+                        logger.info(
+                            "panel=%s cli=%s no rows after %s (max=%s)",
+                            panel.get("name"),
+                            cli,
+                            prev_iso,
+                            to_iso(max_dt) if max_dt else "-",
+                        )
+                        continue
             else:
-                # Blue/Unix: 10-min window already applied in API; post all hits
                 post_items = items
 
             ranges = [it["range_name"] for it in post_items]
-            # unique preserve order for display/buttons
             seen = set()
             ordered = []
             for r in ranges:
@@ -426,17 +419,30 @@ def main():
             if not ranges:
                 continue
 
+            if has_row_time:
+                posted_times = [
+                    parse_event_time(it.get("event_time") or "")
+                    for it in post_items
+                ]
+                posted_times = [x for x in posted_times if x is not None]
+                if posted_times:
+                    set_cli_latest_time(pid, cli, to_iso(max(posted_times)))
+
             caption = format_caption(panel.get("name"), cli, ranges)
             kb = build_copy_keyboard(ranges, limit=3)
             photo = shot if isinstance(shot, (bytes, bytearray)) else None
 
-            if group_id:
+            ptype = panel.get("type")
+            target = group_id
+            if ptype == "lamix_sms":
+                target = st.get("lamix_group_chat_id") or group_id
+            if target:
                 if photo:
-                    ok = tg_send_photo(int(group_id), bytes(photo), caption, reply_markup=kb)
+                    ok = tg_send_photo(int(target), bytes(photo), caption, reply_markup=kb)
                     if not ok:
-                        tg_send(int(group_id), caption, reply_markup=kb)
+                        tg_send(int(target), caption, reply_markup=kb)
                 else:
-                    tg_send(int(group_id), caption, reply_markup=kb)
+                    tg_send(int(target), caption, reply_markup=kb)
 
         time.sleep(CHECK_INTERVAL)
 
