@@ -156,13 +156,21 @@ def format_caption(
 def parse_event_time(raw: str) -> Optional[datetime]:
     if not raw or not str(raw).strip():
         return None
-    s = str(raw).strip()
+    s = str(raw).strip().replace("\n", " ").replace("\r", " ")
+    while "  " in s:
+        s = s.replace("  ", " ")
+    s = s.replace("+00:00", "+0000").replace("-00:00", "+0000")
     if s.endswith("+00"):
         s = s[:-3] + "+0000"
     elif s.endswith("Z"):
         s = s[:-1] + "+0000"
     s2 = s.replace("+0000", "").strip()
-    for candidate in (s, s2):
+    candidates = [s, s2]
+    parts = s.split()
+    if len(parts) >= 2:
+        candidates.append(parts[0] + " " + parts[1])
+        candidates.append((parts[0] + " " + parts[1]).replace("+0000", "").strip())
+    for candidate in candidates:
         for fmt in (
             "%Y-%m-%d %H:%M:%S.%f%z",
             "%Y-%m-%d %H:%M:%S%z",
@@ -170,8 +178,12 @@ def parse_event_time(raw: str) -> Optional[datetime]:
             "%Y-%m-%dT%H:%M:%S%z",
             "%Y-%m-%d %H:%M:%S.%f",
             "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%f",
             "%Y-%m-%dT%H:%M:%S",
             "%Y-%m-%dT%H:%M:%SZ",
+            "%d/%m/%Y %H:%M:%S",
+            "%m/%d/%Y %H:%M:%S",
+            "%Y-%m-%d",
         ):
             try:
                 dt = datetime.strptime(candidate, fmt)
@@ -411,15 +423,15 @@ def main():
                         max_dt = evt
 
                 if not timed:
-                    logger.info(
-                        "panel=%s cli=%s no parseable event times",
+                    samples = [repr((it.get("event_time") or "")[:80]) for it in items[:3]]
+                    logger.warning(
+                        "panel=%s cli=%s no parseable event times samples=%s — post all hits",
                         panel.get("name"),
                         cli,
+                        samples,
                     )
-                    continue
-
-                if prev_dt is None:
-                    # First run: post newest timestamp group only
+                    post_items = list(items)
+                elif prev_dt is None:
                     post_items = [it for evt, it in timed if evt == max_dt]
                     logger.info(
                         "panel=%s cli=%s first-run latest @ %s count=%s",
@@ -429,7 +441,6 @@ def main():
                         len(post_items),
                     )
                 else:
-                    # Same range + same time → skip; newer time → post
                     post_items = [it for evt, it in timed if evt > prev_dt]
                     if not post_items:
                         logger.info(
@@ -441,7 +452,6 @@ def main():
                         )
                         continue
             else:
-                # Blue/Unix: 10-min already applied in API
                 post_items = items
 
             ranges = [it["range_name"] for it in post_items]
@@ -494,20 +504,17 @@ def main():
             )
             ok = False
             if target:
-                # Prefer reliable text first, then optional screenshot
                 ok = tg_send(int(target), caption, reply_markup=kb)
                 if not ok:
                     ok = tg_send(int(target), caption, reply_markup=None)
                 if photo:
                     tg_send_photo(int(target), bytes(photo), caption, reply_markup=kb)
-                # Lamix fallback to main group if dedicated chat fails
                 if not ok and ptype == "lamix_sms" and group_id and int(target) != int(group_id):
                     logger.error("Lamix chat %s failed — fallback main group %s", target, group_id)
                     ok = tg_send(int(group_id), "⚠️ Lamix group failed, posting here:\n" + caption)
             else:
                 logger.error("No target chat for panel=%s", panel.get("name"))
 
-            # Only advance time cursor after a successful post
             if ok and has_row_time and best_dt is not None:
                 set_cli_latest_time(pid, cli, to_iso(best_dt))
             elif not ok:
